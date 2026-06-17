@@ -1,0 +1,261 @@
+services:
+  auth:
+    build:
+      context: ./auth
+      dockerfile: Dockerfile
+    restart: always
+    ports:
+      - "3020:3000"
+    environment:
+      - OTEL_SERVICE_NAME=auth
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318/v1/traces
+    env_file:
+      - ./auth/.env
+    depends_on:
+      - otel-collector
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 512M
+    networks:
+      - public-net
+      - private-net
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: "rabbitmq"
+    restart: always
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      - RABBITMQ_DEFAULT_USER=guest
+      - RABBITMQ_DEFAULT_PASS=guest
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq/
+      - rabbitmq-log:/var/log/rabbitmq
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 512M
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 5672 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - private-net
+ 
+
+
+  order:
+    build:
+      context: ./order
+      dockerfile: Dockerfile
+    restart: always
+    ports:
+      - "3002:3002"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy # Wait until RabbitMQ is fully ready, not just starting
+    environment:
+      - RABBITMQ_URL=amqp://rabbitmq:5672
+      - OTEL_SERVICE_NAME=order
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318/v1/traces
+    env_file:
+      - ./order/.env
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 512M
+    networks:
+      - private-net
+
+  product:
+    build:
+      context: ./product
+      dockerfile: Dockerfile
+    restart: always
+    ports:
+      - "3001:3001"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      - RABBITMQ_URL=amqp://rabbitmq:5672
+      - OTEL_SERVICE_NAME=product
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318/v1/traces
+    env_file:
+      - ./product/.env
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 512M
+    networks:
+      - private-net
+
+  payments:
+    build:
+      context: ./payments
+      dockerfile: Dockerfile
+    restart: always
+    ports:
+      - "3004:3004"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      mongodb:
+        condition: service_started
+    environment:
+      - MONGODB_PAYMENTS_URI=mongodb://mongodb:27017/payments
+      - RABBITMQ_URL=amqp://rabbitmq:5672
+      - PAYMENTS_QUEUE=payments
+      - PAYMENT_RESULTS_QUEUE=payment_results
+      - OTEL_SERVICE_NAME=payments
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318/v1/traces
+    env_file:
+      - ./payments/.env
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 512M
+    networks:
+      - private-net
+
+  api-gateway:
+    build:
+      context: ./api-gateway
+      dockerfile: Dockerfile
+    restart: always
+    ports:
+      - "3003:3003"
+    environment:
+      - RABBITMQ_URL=amqp://rabbitmq:5672
+      - OTEL_SERVICE_NAME=api-gateway
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318/v1/traces
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 256M
+    networks:
+      - public-net
+      - private-net
+
+  mongodb:
+    image: mongo:latest
+    container_name: amzonn-mongodb
+    restart: always
+    # REMOVED ports entirely. MongoDB is completely locked inside the private network.
+    # Your internal services can still connect using standard 'mongodb:27017'
+    volumes:
+      - mongo-data:/data/db
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - private-net
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.104.0
+    container_name: amzonn-otel-collector
+    restart: always
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes:
+      - ./observability/otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
+    ports:
+      - "4315:4317"
+      - "4316:4318"
+    depends_on:
+      - mimir
+      - loki
+      - tempo
+    networks:
+      - private-net
+
+  mimir:
+    image: grafana/mimir:2.12.0
+    container_name: amzonn-mimir
+    restart: always
+    command: ["-config.file=/etc/mimir.yaml"]
+    volumes:
+      - ./observability/mimir-config.yaml:/etc/mimir.yaml:ro
+      - mimir-data:/data/mimir
+    ports:
+      - "9009:9009"
+    networks:
+      - private-net
+
+  loki:
+    image: grafana/loki:3.0.0
+    container_name: amzonn-loki
+    restart: always
+    command: ["-config.file=/etc/loki.yaml"]
+    volumes:
+      - ./observability/loki-config.yaml:/etc/loki.yaml:ro
+      - loki-data:/loki
+    ports:
+      - "3100:3100"
+    networks:
+      - private-net
+
+  tempo:
+    image: grafana/tempo:2.4.1
+    container_name: amzonn-tempo
+    restart: always
+    command: ["-config.file=/etc/tempo.yaml"]
+    volumes:
+      - ./observability/tempo-config.yaml:/etc/tempo.yaml:ro
+      - tempo-data:/var/tempo
+    ports:
+      - "3200:3200"
+    networks:
+      - private-net
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    container_name: amzonn-grafana
+    restart: always
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_AUTH_DISABLE_USERNAME_LOGIN_PROTECTION=true
+      - GF_AUTH_DISABLE_IP_ADDRESS_LOGIN_PROTECTION=true
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - mimir
+      - loki
+      - tempo
+    networks:
+      - private-net
+
+volumes:
+  mongo-data:
+  rabbitmq-data: # Production fix: Named volumes are safer than local paths (~/)
+  rabbitmq-log:
+  grafana-data:
+  mimir-data:
+  loki-data:
+  tempo-data:
+
+networks:
+  public-net:
+  private-net:

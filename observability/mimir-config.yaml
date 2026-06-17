@@ -1,0 +1,33 @@
+# Run all components in a single process
+target: all
+
+# Disable multi-tenancy for simple local setups
+multitenancy_enabled: false
+
+# Server configuration
+server:
+  http_listen_port: 9009
+  grpc_listen_port: 9095
+  log_level: info
+
+# Configure storage to use local filesystem
+common:
+  storage:
+    backend: filesystem
+    filesystem:
+      dir: /data/mimir/data
+
+blocks_storage:
+  backend: filesystem
+  filesystem:
+    dir: /data/mimir/blocks
+
+# Alertmanager and Ruler storage
+alertmanager:
+  data_dir: /data/mimir/alertmanager
+  enable_api: true
+
+ruler_storage:
+  backend: filesystem
+  filesystem:
+    dir: /data/mimir/rules
