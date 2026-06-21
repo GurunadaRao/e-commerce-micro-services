@@ -36,45 +36,72 @@ class App {
   
     setTimeout(async () => {
       try {
-        const amqpServer = "amqp://rabbitmq:5672";
+        const amqpServer = process.env.RABBITMQ_URL || "amqp://rabbitmq:5672";
         const connection = await amqp.connect(amqpServer);
         console.log("Connected to RabbitMQ");
         const channel = await connection.createChannel();
-        await channel.assertQueue("orders");
+
+        // Assert exchange
+        await channel.assertExchange("ecommerce_exchange", "topic", { durable: true });
+
+        // Assert DLQ as Quorum Queue
+        await channel.assertQueue("orders_dlq", {
+          durable: true,
+          arguments: { "x-queue-type": "quorum" }
+        });
+
+        // Assert main queue with DLQ and Quorum options
+        await channel.assertQueue("orders", {
+          durable: true,
+          arguments: {
+            "x-queue-type": "quorum",
+            "x-dead-letter-exchange": "",
+            "x-dead-letter-routing-key": "orders_dlq",
+          },
+        });
+
+        // Bind orders queue to exchange
+        await channel.bindQueue("orders", "ecommerce_exchange", "order.request");
   
         channel.consume("orders", async (data) => {
-          // Consume messages from the order queue on buy
+          if (!data) return;
           console.log("Consuming ORDER service");
-          const { products, username, orderId } = JSON.parse(data.content);
-  
-          const newOrder = new Order({
-            products,
-            user: username,
-            totalPrice: products.reduce((acc, product) => acc + product.price, 0),
-          });
-  
-          // Save order to DB
-          await newOrder.save();
-  
-          // Send ACK to ORDER service
-          channel.ack(data);
-          console.log("Order saved to DB and ACK sent to ORDER queue");
-  
-          // Send fulfilled order to PRODUCTS service
-          // Include orderId in the message
-          const { user, products: savedProducts, totalPrice } = newOrder.toJSON();
-          channel.sendToQueue(
-            "products",
-            Buffer.from(JSON.stringify({ orderId, user, products: savedProducts, totalPrice }))
-          );
+
+          try {
+            const { products, username, orderId } = JSON.parse(data.content.toString());
+    
+            const newOrder = new Order({
+              products,
+              user: username,
+              totalPrice: products.reduce((acc, product) => acc + product.price, 0),
+            });
+    
+            // Save order to DB
+            await newOrder.save();
+    
+            // Send ACK to ORDER service
+            channel.ack(data);
+            console.log("Order saved to DB and ACK sent to ORDER queue");
+    
+            // Send fulfilled order event to products via exchange
+            const { user, products: savedProducts, totalPrice } = newOrder.toJSON();
+            channel.publish(
+              "ecommerce_exchange",
+              "order.fulfilled",
+              Buffer.from(JSON.stringify({ orderId, user, products: savedProducts, totalPrice })),
+              { deliveryMode: 2 }
+            );
+          } catch (err) {
+            console.error("Order queue message failed:", err.message);
+            // send to DLQ
+            channel.nack(data, false, false);
+          }
         });
       } catch (err) {
         console.error("Failed to connect to RabbitMQ:", err.message);
       }
     }, 10000); // add a delay to wait for RabbitMQ to start in docker-compose
   }
-
-
 
   start() {
     this.server = this.app.listen(config.port, () =>

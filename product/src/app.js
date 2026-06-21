@@ -4,6 +4,7 @@ const config = require("./config");
 const MessageBroker = require("./utils/messageBroker");
 const productsRouter = require("./routes/productRoutes");
 const setupMetrics = require("./observability/metrics");
+const redisHelper = require("./utils/redis");
 require("dotenv").config();
 
 class App {
@@ -21,6 +22,7 @@ class App {
       useUnifiedTopology: true,
     });
     console.log("MongoDB connected");
+    await redisHelper.initRedis();
   }
 
   async disconnectDB() {
@@ -50,6 +52,9 @@ class App {
 
   async stop() {
     await mongoose.disconnect();
+    try {
+      await redisHelper.client.quit();
+    } catch (err) {}
     this.server.close();
     console.log("Server stopped");
   }

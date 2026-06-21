@@ -1,0 +1,116 @@
+name: Continuous Integration
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  lint-and-test:
+    name: Lint & Test Microservices
+    runs-on: ubuntu-latest
+
+    services:
+      mongodb:
+        image: mongo:latest
+        ports:
+          - 27017:27017
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: payments_user
+          POSTGRES_PASSWORD: payments_password
+          POSTGRES_DB: payments_db
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+      redis:
+        image: redis:alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+      rabbitmq:
+        image: rabbitmq:3-management-alpine
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5672:5672
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: 20
+        cache: 'npm'
+
+    - name: Install Root & Microservices Dependencies
+      run: |
+        npm install
+        for dir in auth product order payments; do
+          echo "Installing dependencies for $dir..."
+          cd $dir && npm install && cd ..
+        done
+
+    - name: Run Linting
+      run: |
+        echo "Running lint check..."
+        npm run lint --if-present
+
+    - name: Run Auth Service Tests
+      env:
+        MONGO_URI: mongodb://localhost:27017/auth_test
+        REDIS_URL: redis://localhost:6379
+        JWT_SECRET: test_secret_key
+      run: |
+        cd auth
+        npm test --if-present
+        cd ..
+
+    - name: Run Product Service Tests
+      env:
+        MONGO_URI: mongodb://localhost:27017/product_test
+        RABBITMQ_URL: amqp://localhost:5672
+        REDIS_URL: redis://localhost:6379
+      run: |
+        cd product
+        npm test --if-present
+        cd ..
+
+    - name: Run Order Service Tests
+      env:
+        MONGO_URI: mongodb://localhost:27017/order_test
+        RABBITMQ_URL: amqp://localhost:5672
+      run: |
+        cd order
+        npm test --if-present
+        cd ..
+
+    - name: Run Payments Service Tests
+      env:
+        POSTGRES_HOST: localhost
+        POSTGRES_PORT: 5432
+        POSTGRES_USER: payments_user
+        POSTGRES_PASSWORD: payments_password
+        POSTGRES_DB: payments_db
+        RABBITMQ_URL: amqp://localhost:5672
+        PAYMENTS_QUEUE: payments
+        PAYMENT_RESULTS_QUEUE: payment_results
+      run: |
+        cd payments
+        npm test --if-present
+        cd ..

@@ -1,0 +1,61 @@
+_format_version: "3.0"
+_transform: true
+
+services:
+  - name: auth-service
+    url: http://auth:3000
+    routes:
+      - name: auth-route
+        paths:
+          - /auth
+        strip_path: true
+
+  - name: product-service
+    url: http://product:3001
+    routes:
+      - name: product-route
+        paths:
+          - /products
+        strip_path: true
+
+  - name: payments-service
+    url: http://payments:3004
+    routes:
+      - name: payments-route
+        paths:
+          - /payments
+        strip_path: false
+
+plugins:
+  - name: opentelemetry
+    config:
+      endpoint: http://otel-collector:4318/v1/traces
+      resource_attributes:
+        service.name: kong-gateway
+
+  - name: rate-limiting
+    config:
+      second: 15
+      minute: 200
+      policy: local
+
+  - name: cors
+    config:
+      origins:
+        - "*"
+      methods:
+        - GET
+        - POST
+        - PUT
+        - DELETE
+        - OPTIONS
+      headers:
+        - Accept
+        - Accept-Version
+        - Content-Length
+        - Content-MD5
+        - Content-Type
+        - Date
+        - Authorization
+        - Idempotency-Key
+      credentials: true

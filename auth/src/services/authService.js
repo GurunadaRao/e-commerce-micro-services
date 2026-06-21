@@ -13,8 +13,7 @@ class AuthService {
   }
 
   async findUserByUsername(username) {
-    const user = await User.findOne({ username });
-    return user;
+    return await this.userRepository.getUserByUsername(username);
   }
 
   async login(username, password) {

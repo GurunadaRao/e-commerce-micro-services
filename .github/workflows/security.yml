@@ -1,0 +1,37 @@
+name: Security Analysis
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  schedule:
+    - cron: '0 0 * * 1' # Run every Monday at midnight
+
+jobs:
+  npm-audit:
+    name: Dependency Audit
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: 20
+
+    - name: Run audit in root
+      run: npm audit --audit-level=high || true
+
+    - name: Run audit in auth
+      run: cd auth && npm audit --audit-level=high || true
+
+    - name: Run audit in product
+      run: cd product && npm audit --audit-level=high || true
+
+    - name: Run audit in order
+      run: cd order && npm audit --audit-level=high || true
+
+    - name: Run audit in payments
+      run: cd payments && npm audit --audit-level=high || true

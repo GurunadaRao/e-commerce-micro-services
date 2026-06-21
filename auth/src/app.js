@@ -4,6 +4,7 @@ const config = require("./config");
 const authMiddleware = require("./middlewares/authMiddleware");
 const AuthController = require("./controllers/authController");
 const setupMetrics = require("./observability/metrics");
+const redisHelper = require("./utils/redis");
 
 class App {
   constructor() {
@@ -20,6 +21,7 @@ class App {
       useUnifiedTopology: true,
     });
     console.log("MongoDB connected");
+    await redisHelper.initRedis();
   }
 
   async disconnectDB() {
@@ -45,6 +47,9 @@ class App {
 
   async stop() {
     await mongoose.disconnect();
+    try {
+      await redisHelper.client.quit();
+    } catch (err) {}
     this.server.close();
     console.log("Server stopped");
   }

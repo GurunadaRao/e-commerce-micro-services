@@ -1,9 +1,9 @@
 const express = require("express");
-const mongoose = require("mongoose");
 const config = require("./config");
 const paymentRoutes = require("./routes/paymentRoutes");
 const messageBroker = require("./utils/messageBroker");
 const PaymentService = require("./services/paymentService");
+const db = require("./utils/db");
 const {
   applySecurity,
   createRateLimiter,
@@ -21,13 +21,12 @@ class App {
 
   async connectDB() {
     try {
-      await mongoose.connect(config.mongoURI, {
-        useNewUrlParser: true,
-        useUnifiedTopology: true,
-      });
-      console.log("MongoDB connected (payments)");
+      await db.initDB();
+      this.dbConnected = true;
+      console.log("PostgreSQL connected (payments)");
     } catch (err) {
       console.error("Payments DB connection error:", err.message);
+      this.dbConnected = false;
     }
   }
 
@@ -42,7 +41,7 @@ class App {
     this.app.get("/health", (req, res) => {
       res.status(200).json({
         service: "payments",
-        mongo: mongoose.connection.readyState === 1 ? "connected" : "down",
+        postgres: this.dbConnected ? "connected" : "down",
         rabbitmq: messageBroker.connected ? "connected" : "down",
       });
     });
@@ -71,7 +70,7 @@ class App {
 
   async stop() {
     await messageBroker.close();
-    await mongoose.disconnect();
+    await db.pool.end();
     this.server.close();
     console.log("Payments service stopped");
   }

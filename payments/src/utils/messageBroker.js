@@ -13,10 +13,40 @@ class MessageBroker {
       try {
         this.connection = await amqp.connect(config.rabbitMQUrl);
         this.channel = await this.connection.createChannel();
-        await this.channel.assertQueue(config.paymentsQueue, { durable: true });
+        
+        // Assert exchange
+        await this.channel.assertExchange("ecommerce_exchange", "topic", { durable: true });
+
+        // Assert DLQs as Quorum Queues
+        await this.channel.assertQueue(`${config.paymentsQueue}_dlq`, {
+          durable: true,
+          arguments: { "x-queue-type": "quorum" }
+        });
+        await this.channel.assertQueue(`${config.paymentResultsQueue}_dlq`, {
+          durable: true,
+          arguments: { "x-queue-type": "quorum" }
+        });
+
+        // Assert main queues with DLQ and Quorum configuration
+        await this.channel.assertQueue(config.paymentsQueue, {
+          durable: true,
+          arguments: {
+            "x-queue-type": "quorum",
+            "x-dead-letter-exchange": "",
+            "x-dead-letter-routing-key": `${config.paymentsQueue}_dlq`,
+          },
+        });
         await this.channel.assertQueue(config.paymentResultsQueue, {
           durable: true,
+          arguments: {
+            "x-queue-type": "quorum",
+            "x-dead-letter-exchange": "",
+            "x-dead-letter-routing-key": `${config.paymentResultsQueue}_dlq`,
+          },
         });
+
+        // Bind payments queue to exchange
+        await this.channel.bindQueue(config.paymentsQueue, "ecommerce_exchange", "payment.request");
 
         this.connection.on("close", () => {
           this.connected = false;
@@ -47,13 +77,13 @@ class MessageBroker {
     }
   }
 
-  async publish(queue, payload) {
+  async publish(routingKey, payload) {
     if (!this.channel) {
       console.error("Payments RabbitMQ channel is not available");
       return false;
     }
 
-    return this.channel.sendToQueue(queue, Buffer.from(JSON.stringify(payload)), {
+    return this.channel.publish("ecommerce_exchange", routingKey, Buffer.from(JSON.stringify(payload)), {
       contentType: "application/json",
       deliveryMode: 2,
     });

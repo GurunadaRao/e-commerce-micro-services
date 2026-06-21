@@ -1,6 +1,7 @@
 const Product = require("../models/product");
 const messageBroker = require("../utils/messageBroker");
 const uuid = require('uuid');
+const { client: redisClient } = require("../utils/redis");
 
 /**
  * Class to hold the API implementation for the product services
@@ -12,6 +13,36 @@ class ProductController {
     this.getOrderStatus = this.getOrderStatus.bind(this);
     this.ordersMap = new Map();
 
+    messageBroker.onConnect(() => {
+      // 1. Setup payment results listener globally once
+      messageBroker.consumeMessage("payment_results", (data) => {
+        const { orderId, status } = data;
+        const order = this.ordersMap.get(orderId);
+        if (order) {
+          this.ordersMap.set(orderId, {
+            ...order,
+            payment: data,
+            status: status === "completed" ? "payment_completed" : "payment_failed",
+          });
+          console.log(`[Queue: payment_results] Updated order ${orderId} status to: ${status === "completed" ? "payment_completed" : "payment_failed"}`);
+        }
+      });
+
+      // 2. Setup products/fulfillment results listener globally once
+      messageBroker.consumeMessage("products", (data) => {
+        const orderData = JSON.parse(JSON.stringify(data));
+        const { orderId } = orderData;
+        const order = this.ordersMap.get(orderId);
+        if (order) {
+          this.ordersMap.set(orderId, { 
+            ...order, 
+            ...orderData, 
+            status: 'completed' 
+          });
+          console.log(`[Queue: products] Completed order ${orderId}`);
+        }
+      });
+    });
   }
 
   async createProduct(req, res, next) {
@@ -28,6 +59,14 @@ class ProductController {
       }
 
       await product.save({ timeout: 30000 });
+
+      // Invalidate products cache
+      try {
+        await redisClient.del("products:all");
+        console.log("Redis cache invalidated for product catalog");
+      } catch (err) {
+        console.error("Redis delete error on product creation:", err);
+      }
 
       res.status(201).json(product);
     } catch (error) {
@@ -67,7 +106,7 @@ class ProductController {
       });
 
       const paymentMethod = req.body.paymentMethod || req.body.method || "cod";
-      const paymentQueued = await messageBroker.publishMessage("payments", {
+      const paymentQueued = await messageBroker.publishMessage("payment.request", {
         orderId,
         userId,
         amount: totalPrice,
@@ -83,19 +122,7 @@ class ProductController {
         return res.status(503).json({ message: "Payment service is unavailable" });
       }
 
-      messageBroker.consumeMessage("payment_results", (data) => {
-        if (data.orderId !== orderId) return;
-
-        const order = this.ordersMap.get(orderId);
-        if (!order) return;
-
-        this.ordersMap.set(orderId, {
-          ...order,
-          payment: data,
-          status: data.status === "completed" ? "payment_completed" : "payment_failed",
-        });
-      });
-
+      // Poll until status changes to payment_completed or payment_failed
       let order = this.ordersMap.get(orderId);
       let paymentWaits = 0;
       while (order.status === "pending_payment" && paymentWaits < 30) {
@@ -111,28 +138,21 @@ class ProductController {
         });
       }
   
-      await messageBroker.publishMessage("orders", {
+      const orderPublishQueued = await messageBroker.publishMessage("order.request", {
         products,
         username,
-        orderId, // include the order ID in the message to orders queue
+        orderId,
       });
 
-      messageBroker.consumeMessage("products", (data) => {
-        const orderData = JSON.parse(JSON.stringify(data));
-        const { orderId } = orderData;
-        const order = this.ordersMap.get(orderId);
-        if (order) {
-          // update the order in the map
-          this.ordersMap.set(orderId, { ...order, ...orderData, status: 'completed' });
-          console.log("Updated order:", order);
-        }
-      });
+      if (!orderPublishQueued) {
+        return res.status(503).json({ message: "Order queue is unavailable" });
+      }
   
       // Long polling until order is completed
       let orderWaits = 0;
       order = this.ordersMap.get(orderId);
       while (order.status !== 'completed' && orderWaits < 30) {
-        await new Promise(resolve => setTimeout(resolve, 1000)); // wait for 1 second before checking status again
+        await new Promise(resolve => setTimeout(resolve, 1000));
         order = this.ordersMap.get(orderId);
         orderWaits += 1;
       }
@@ -141,14 +161,12 @@ class ProductController {
         return res.status(202).json(order);
       }
   
-      // Once the order is marked as completed, return the complete order details
       return res.status(201).json(order);
     } catch (error) {
       console.error(error);
       res.status(500).json({ message: "Server error" });
     }
   }
-  
 
   async getOrderStatus(req, res, next) {
     const { orderId } = req.params;
@@ -165,7 +183,27 @@ class ProductController {
       if (!token) {
         return res.status(401).json({ message: "Unauthorized" });
       }
+
+      const cacheKey = "products:all";
+      try {
+        const cachedProducts = await redisClient.get(cacheKey);
+        if (cachedProducts) {
+          console.log("Redis hit for product catalog");
+          return res.status(200).json(JSON.parse(cachedProducts));
+        }
+      } catch (err) {
+        console.error("Redis get error in productController:", err);
+      }
+
+      console.log("Redis miss for product catalog");
       const products = await Product.find({});
+
+      try {
+        // Cache products for 1 hour (3600 seconds)
+        await redisClient.set(cacheKey, JSON.stringify(products), { EX: 3600 });
+      } catch (err) {
+        console.error("Redis set error in productController:", err);
+      }
 
       res.status(200).json(products);
     } catch (error) {
